@@ -658,11 +658,54 @@ static char * php_couchbase_zval_to_payload(zval *value, size_t *payload_len, un
 	smart_str_free(&buf);
 	return payload;
 }
-/* }}} */
+
+static int starts_with_brace(const char *ptr, size_t len) {
+	size_t ii;
+	for (ii = 0; ii < len && isspace(ptr[ii]); ii++) {
+		;
+	}
+
+	if (ii < len && ptr[ii] == '{') {
+		return 1;
+	}
+
+	return 0;
+}
+
+static int ends_with_brace(const char *ptr, size_t len) {
+	int ii;
+	for (ii = len - 1; ii > -1 && (isspace(ptr[ii]) || ptr[ii] == '\0'); ii--) {
+		;
+	}
+
+	if (ii > -1 && ptr[ii] == '}') {
+		return 1;
+	}
+
+	return 0;
+}
+
+/**
+ * Determine if payload is JSON by simple virtue of start and end curly braces
+ */
+static zend_bool is_uncompressed_json_payload(char *payload, size_t len) {
+	if (starts_with_brace(payload, len) && ends_with_brace(payload, len)) {
+#ifdef C_OUT_DEBUG
+		fprintf(stdout, "C Code: Payload is uncompressed JSON\n");
+#endif
+		return 1;
+	} else {
+#ifdef C_OUT_DEBUG
+		fprintf(stdout, "C Code: Payload is NOT uncompressed JSON\n");
+#endif
+		return 0;
+	}
+}
 
 static int php_couchbase_zval_from_payload(zval *value, char *payload, size_t payload_len, unsigned int flags, int serializer TSRMLS_DC) /* {{{ */ {
 	int compressor;
 	zend_bool payload_emalloc = 0;
+	zend_bool is_uncompressed_json = 0;
 #ifdef HAVE_COMPRESSION
 	char *buffer = NULL;
 #endif
@@ -680,18 +723,33 @@ static int php_couchbase_zval_from_payload(zval *value, char *payload, size_t pa
 		return 1;
 	}
 
+	is_uncompressed_json = is_uncompressed_json_payload(payload, payload_len);
+
 	if ((compressor = COUCHBASE_GET_COMPRESSION(flags))) {
 #ifdef HAVE_COMPRESSION
 		size_t len, length;
 		zend_bool decompress_status = 0;
-		/* This is copied from pecl-memcached */
-		memcpy(&len, payload, sizeof(size_t));
+		if (is_uncompressed_json == 1) {
+			len = payload_len;
+			compressor = COUCHBASE_COMPRESSION_NONE;
+		} else {
+			/* This is copied from pecl-memcached */
+			memcpy(&len, payload, sizeof(size_t));
+		}
+
 		buffer = emalloc(len + 1);
-		payload_len -= sizeof(size_t);
-		payload += sizeof(size_t);
+		if (is_uncompressed_json == 0) {
+			payload_len -= sizeof(size_t);
+			payload += sizeof(size_t);
+		}
 		length = len;
 
 		switch (compressor) {
+			case COUCHBASE_COMPRESSION_NONE:
+				decompress_status = 1;
+				length = len;
+				memcpy(buffer, payload, len + 1);
+				break;
 			case COUCHBASE_COMPRESSION_FASTLZ:
 #ifdef HAVE_COMPRESSION_FASTLZ
 				decompress_status = ((length = fastlz_decompress(payload, payload_len, buffer, len)) > 0);

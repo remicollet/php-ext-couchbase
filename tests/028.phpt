@@ -10,8 +10,8 @@ $handle = couchbase_connect($url);
 var_dump($handle);
 
 $url  = "hTtps://" . COUCHBASE_CONFIG_USER . ':' . COUCHBASE_CONFIG_PASSWD . '@' . COUCHBASE_CONFIG_HOST . '/' . COUCHBASE_CONFIG_BUCKET;
-$handle = new Couchbase($url);
-print_r($handle);
+$handle_oo = new Couchbase($url);
+print_r($handle_oo);
 ?>
 --EXPECTF--
 resource(%d) of type (Couchbase)

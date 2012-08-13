@@ -1357,7 +1357,7 @@ static void php_couchbase_free_connparams(
  */
 
 
-/* internal implementions */
+/* internal implementations */
 static void php_couchbase_create_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{{ */ {
 	char *user = NULL, *passwd = NULL, *bucket = NULL;
 	int host_len = 0, user_len = 0, passwd_len = 0, bucket_len = 0;

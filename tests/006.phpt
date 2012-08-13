@@ -1,7 +1,10 @@
 --TEST--
 Check for couchbase_flush
 --SKIPIF--
-<?php include "skipif.inc" ?>
+<?php
+include "skipif.inc";
+die("skip disabled until new flush is available");
+?>
 --FILE--
 <?php
 include "couchbase.inc";

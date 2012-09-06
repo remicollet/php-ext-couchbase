@@ -1379,7 +1379,7 @@ static void php_couchbase_create_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {
 		libcouchbase_error_t retval;
 		libcouchbase_io_opt_t *iops;
 		php_couchbase_res *couchbase_res;
-		php_couchbase_ctx *ctx;
+		php_couchbase_ctx *ctx = NULL;
 		char *hashed_key;
 		uint hashed_key_len = 0;
 
@@ -1514,6 +1514,7 @@ create_new_link:
 				libcouchbase_destroy(handle);
 				pefree(couchbase_res, persistent);
 				efree(ctx);
+				ctx = NULL;
 				RETURN_FALSE;
 			}
 
@@ -1527,6 +1528,7 @@ create_new_link:
 				}
 				efree(hashed_key);
 				efree(ctx);
+				ctx = NULL;
 			}
 		}
 
@@ -1536,7 +1538,7 @@ create_new_link:
 			zend_update_property(couchbase_ce, self, ZEND_STRL(COUCHBASE_PROPERTY_HANDLE), return_value TSRMLS_CC);
 		}
 		php_couchbase_free_connparams(&cparams);
-		efree(ctx);
+        efree(ctx);
 	}
 }
 /* }}} */

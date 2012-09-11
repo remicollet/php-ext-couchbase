@@ -1332,7 +1332,9 @@ static int php_couchbase_make_params(struct php_couchbase_connparams_st *cparams
             _append_host_port(curstr, &newstr, ni->host, 0);
         }
 
-        efree(curstr);
+        if (curstr != NULL) {
+            efree(curstr);
+        }
         curstr = newstr;
     }
 
@@ -1548,8 +1550,10 @@ create_new_link:
 			zend_update_property(couchbase_ce, self, ZEND_STRL(COUCHBASE_PROPERTY_HANDLE), return_value TSRMLS_CC);
 		}
 		php_couchbase_free_connparams(&cparams);
-        efree(ctx);
-	}
+        if (ctx != NULL) {
+            efree(ctx);
+        }
+    }
 }
 /* }}} */
 

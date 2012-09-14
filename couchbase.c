@@ -1207,9 +1207,16 @@ php_couchbase_stat_callback(libcouchbase_t handle,
 			zend_hash_add(Z_ARRVAL_P(ctx->rv), (char *)server_endpoint, strlen(server_endpoint) + 1, (void **)&node, sizeof(zval *), NULL);
 		}
 
+		char *string_key = emalloc(nkey + 1);
+		memcpy(string_key, key, nkey);
+		string_key[nkey] = '\0';
+
 		MAKE_STD_ZVAL(v);
 		ZVAL_STRINGL(v, (char *)bytes, nbytes, 1);
-		zend_hash_add(Z_ARRVAL_P(node), (char *)key, nkey + 1, (void **)&v, sizeof(zval *), NULL);
+
+		zend_hash_add(Z_ARRVAL_P(node), string_key, nkey + 1, (void **)&v, sizeof(zval *), NULL);
+
+		efree(string_key);
 	}
 
 }

@@ -220,7 +220,12 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_get_option, 0, 0, 2)
 ZEND_END_ARG_INFO()
 
 COUCHBASE_ARG_PREFIX
-ZEND_BEGIN_ARG_INFO_EX(arginfo_get_version, 0, 0, 0)
+ZEND_BEGIN_ARG_INFO_EX(arginfo_get_version, 0, 0, 1)
+	ZEND_ARG_INFO(0, resource)
+ZEND_END_ARG_INFO()
+
+COUCHBASE_ARG_PREFIX
+ZEND_BEGIN_ARG_INFO_EX(arginfo_get_client_version, 0, 0, 0)
 ZEND_END_ARG_INFO()
 /* }}} */
 
@@ -394,6 +399,7 @@ static zend_function_entry couchbase_functions[] = {
 	PHP_FE(couchbase_set_option, arginfo_set_option)
 	PHP_FE(couchbase_get_option, arginfo_get_option)
 	PHP_FE(couchbase_get_version, arginfo_get_version)
+	PHP_FE(couchbase_get_client_version, arginfo_get_client_version)
 	{NULL, NULL, NULL}
 };
 /* }}} */
@@ -424,6 +430,7 @@ static zend_function_entry couchbase_methods[] = {
 	PHP_ME(couchbase, setOption, arginfo_m_setoption, ZEND_ACC_PUBLIC)
 	PHP_ME(couchbase, getOption, arginfo_m_getoption, ZEND_ACC_PUBLIC)
 	PHP_ME(couchbase, getVersion, arginfo_get_version, ZEND_ACC_PUBLIC)
+	PHP_ME(couchbase, getClientVersion, arginfo_get_client_version, ZEND_ACC_PUBLIC)
 	{NULL, NULL, NULL}
 };
 /* }}} */
@@ -1208,6 +1215,38 @@ php_couchbase_stat_callback(libcouchbase_t handle,
 }
 /* }}} */
 
+/* {{{ static void php_couchbase_version_callback(...) */
+static void
+php_couchbase_version_callback(libcouchbase_t handle,
+							   const void* cookie,
+							   const char* server_endpoint,
+							   libcouchbase_error_t error,
+							   const char* version_string,
+							   libcouchbase_size_t nversion_string) {
+	php_couchbase_ctx *ctx = (php_couchbase_ctx *)cookie;
+	php_ignore_value(handle);
+
+	ctx->res->rc = error;
+	if (LIBCOUCHBASE_SUCCESS != error || nversion_string == 0) {
+		--ctx->res->seqno;
+		ctx->res->io->stop_event_loop(ctx->res->io);
+		return;
+	} else if (nversion_string > 0) {
+		zval *server_name, *v;
+		zval **ppzval;
+
+		if (IS_ARRAY != Z_TYPE_P(ctx->rv)) {
+			array_init(ctx->rv);
+		}
+
+		if (zend_hash_find(Z_ARRVAL_P(ctx->rv), (char *)server_endpoint, strlen(server_endpoint) + 1, (void **)&ppzval) != SUCCESS) {
+			MAKE_STD_ZVAL(v);
+			ZVAL_STRINGL(v, version_string, nversion_string, 1);
+
+			zend_hash_add(Z_ARRVAL_P(ctx->rv), (char *)server_endpoint, strlen(server_endpoint) + 1, (void **)&v, sizeof(zval *), NULL);
+		}
+	}
+}
 
 struct php_couchbase_nodeinfo_st;
 
@@ -1502,6 +1541,7 @@ create_new_link:
 			php_ignore_value(libcouchbase_set_flush_callback(handle, php_couchbase_flush_callback));
 			php_ignore_value(libcouchbase_set_arithmetic_callback(handle, php_couchbase_arithmetic_callback));
 			php_ignore_value(libcouchbase_set_stat_callback(handle, php_couchbase_stat_callback));
+			php_ignore_value(libcouchbase_set_version_callback(handle, php_couchbase_version_callback));
 
 			couchbase_res = pecalloc(1, sizeof(php_couchbase_res), persistent);
 			couchbase_res->handle = handle;
@@ -2486,6 +2526,57 @@ static void php_couchbase_stats_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{
 }
 /* }}} */
 
+static void php_couchbase_version_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{{ */ {
+	zval *res;
+
+	if (oo) {
+		zval *self = getThis();
+		res = zend_read_property(couchbase_ce, self, ZEND_STRL(COUCHBASE_PROPERTY_HANDLE), 1 TSRMLS_CC);
+		if (ZVAL_IS_NULL(res) || IS_RESOURCE != Z_TYPE_P(res)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "unintilized couchbase");
+			RETURN_FALSE;
+		}
+	} else {
+		if(zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "r", &res) == FAILURE) {
+			return;
+		}
+	}
+	{
+		libcouchbase_error_t retval;
+		php_couchbase_res *couchbase_res;
+		php_couchbase_ctx *ctx;
+
+		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (couchbase_res->async) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
+			RETURN_FALSE;
+		}
+
+		ctx = ecalloc(1, sizeof(php_couchbase_ctx));
+		ctx->res = couchbase_res;
+		ctx->rv = return_value;
+
+		retval = libcouchbase_server_versions(couchbase_res->handle, (const void *)ctx);
+		if (LIBCOUCHBASE_SUCCESS != retval) {
+			efree(ctx);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING,
+					"Failed to schedule server version request: %s", libcouchbase_strerror(couchbase_res->handle, retval));
+			RETURN_FALSE;
+		}
+
+		couchbase_res->seqno += 1;
+		couchbase_res->io->run_event_loop(couchbase_res->io);
+		if (LIBCOUCHBASE_SUCCESS != ctx->res->rc) {
+			efree(ctx);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING,
+					"Failed to fetch server version: %s", libcouchbase_strerror(couchbase_res->handle, ctx->res->rc));
+			RETURN_FALSE;
+		}
+		efree(ctx);
+	}
+}
+/* }}} */
+
 static void php_couchbase_cas_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{{ */ {
 	zval *res, *value;
 	time_t exp = {0};
@@ -2892,6 +2983,13 @@ PHP_METHOD(couchbase, getOption) {
 /* {{{ proto Couchbase::getVersion(void)
  */
 PHP_METHOD(couchbase, getVersion) {
+	php_couchbase_version_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU, 1);
+}
+/* }}} */
+
+/* {{{ proto Couchbase::getClientVersion(void)
+ */
+PHP_METHOD(couchbase, getClientVersion) {
 	RETURN_STRING(PHP_COUCHBASE_VERSION, 1);
 }
 /* }}} */
@@ -3062,6 +3160,13 @@ PHP_FUNCTION(couchbase_get_option) {
 /* {{{ proto couchbase_get_version(void)
  */
 PHP_FUNCTION(couchbase_get_version) {
+	php_couchbase_version_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
+}
+/* }}} */
+
+/* {{{ proto couchbase_get_client_version(void)
+ */
+PHP_FUNCTION(couchbase_get_client_version) {
 	RETURN_STRING(PHP_COUCHBASE_VERSION, 1);
 }
 /* }}} */

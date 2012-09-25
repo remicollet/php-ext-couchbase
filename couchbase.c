@@ -1335,6 +1335,13 @@ static int _append_host_port(char *oldstr, char **newstr,
     }
 }
 
+static long _check_expiry(long expiry) {
+	if (expiry < 0) {
+		php_error(E_ERROR, "Expiry must not be negative (%d given).", expiry);
+	}
+	return expiry;
+}
+
 static int php_couchbase_make_params(struct php_couchbase_connparams_st *cparams)
 {
     struct php_couchbase_nodeinfo_st *ni;
@@ -2136,7 +2143,7 @@ static void php_couchbase_store_impl(INTERNAL_FUNCTION_PARAMETERS, libcouchbase_
 		couchbase_res->seqno += 1;
 
 		if (expire) {
-			exp = expire;
+			exp = _check_expiry(expire);
 		}
 
 		if (cas) {
@@ -2191,7 +2198,7 @@ static void php_couchbase_store_impl(INTERNAL_FUNCTION_PARAMETERS, libcouchbase_
 		array_init(ctx->rv);
 
 		if (expire) {
-			exp = expire;
+			exp = _check_expiry(expire);
 		}
 
 		for(zend_hash_internal_pointer_reset(Z_ARRVAL_P(akeys));
@@ -2451,7 +2458,7 @@ static void php_couchbase_arithmetic_impl(INTERNAL_FUNCTION_PARAMETERS, char op,
 		}
 
 		if (expire) {
-			exp = expire;
+			exp = _check_expiry(expire);
 		}
 
 		ctx = ecalloc(1, sizeof(php_couchbase_ctx));
@@ -2624,7 +2631,7 @@ static void php_couchbase_cas_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{{ 
 		ctx->rv = return_value;
 
 		if (expire) {
-			exp = expire;
+			exp = _check_expiry(expire);
 		}
 
 		if (cas) {

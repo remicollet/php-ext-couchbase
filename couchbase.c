@@ -1542,11 +1542,11 @@ create_new_link:
 
 			php_ignore_value(libcouchbase_set_error_callback(handle, php_couchbase_error_callback));
 
-			if (LIBCOUCHBASE_SUCCESS != (retval = libcouchbase_connect(handle))) {
-			    php_couchbase_free_connparams(&cparams);
+			retval = libcouchbase_connect(handle);
+
+			if (LIBCOUCHBASE_SUCCESS != retval) {
 				php_error_docref(NULL TSRMLS_CC, E_WARNING,
 						"Failed to connect libcouchbase to server: %s", libcouchbase_strerror(handle, retval));
-				RETURN_FALSE;
 			}
 
 			php_ignore_value(libcouchbase_set_get_callback(handle, php_couchbase_get_callback));
@@ -1570,21 +1570,20 @@ create_new_link:
 			libcouchbase_set_cookie(handle, (const void *)ctx);
 
 			/* wait for the connection established */
-			libcouchbase_wait(handle);
+			if (LIBCOUCHBASE_SUCCESS == retval) { /* earlier libcouchbase_connect's retval */
+				libcouchbase_wait(handle);
+			}
 
 			couchbase_res->seqno = 0;
 			if (LIBCOUCHBASE_SUCCESS != (retval = libcouchbase_get_last_error(handle))) {
-			    php_couchbase_free_connparams(&cparams);
-				php_error_docref(NULL TSRMLS_CC, E_WARNING,
-						"Failed to connect libcouchbase to server: %s", libcouchbase_strerror(handle, retval));
-				libcouchbase_destroy(handle);
-				pefree(couchbase_res, persistent);
-				efree(ctx);
-				ctx = NULL;
-				RETURN_FALSE;
+				couchbase_res->rc = retval;
+				couchbase_res->is_connected = 0;
+				php_error(E_WARNING, "Failed to establish libcouchbase connection to server: %s", libcouchbase_strerror(handle, retval));
+			} else {
+				couchbase_res->is_connected = 1;
 			}
 
-			if (persistent) {
+			if (persistent && couchbase_res->is_connected) {
 				zend_rsrc_list_entry le;
 				Z_TYPE(le) = le_pcouchbase;
 				le.ptr = couchbase_res;
@@ -1602,7 +1601,12 @@ create_new_link:
 		if (oo) {
 			zval *self = getThis();
 			zend_update_property(couchbase_ce, self, ZEND_STRL(COUCHBASE_PROPERTY_HANDLE), return_value TSRMLS_CC);
+		} else if (!couchbase_res->is_connected) { /* !oo && !connected */
+			php_couchbase_free_connparams(&cparams);
+			efree(ctx);
+			RETURN_FALSE;
 		}
+
 		php_couchbase_free_connparams(&cparams);
         if (ctx != NULL) {
             efree(ctx);
@@ -1647,6 +1651,10 @@ static void php_couchbase_get_impl(INTERNAL_FUNCTION_PARAMETERS, int multi, int 
 		}
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -1734,6 +1742,10 @@ static void php_couchbase_get_impl(INTERNAL_FUNCTION_PARAMETERS, int multi, int 
 		}
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -1906,11 +1918,15 @@ static void php_couchbase_get_delayed_impl(INTERNAL_FUNCTION_PARAMETERS, int oo)
 		char **keys;
 		long nkey, *klens, i;
 
+		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
+
 		nkey = zend_hash_num_elements(Z_ARRVAL_P(akeys));
 		keys = ecalloc(nkey, sizeof(char *));
 		klens = ecalloc(nkey, sizeof(long));
-
-		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
 
 		for(i=0, zend_hash_internal_pointer_reset(Z_ARRVAL_P(akeys));
 				zend_hash_has_more_elements(Z_ARRVAL_P(akeys)) == SUCCESS;
@@ -2038,6 +2054,10 @@ static void php_couchbase_fetch_impl(INTERNAL_FUNCTION_PARAMETERS, int multi, in
 		php_couchbase_ctx *ctx;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (!couchbase_res->async) {
 			RETURN_FALSE;
 		}
@@ -2119,6 +2139,10 @@ static void php_couchbase_store_impl(INTERNAL_FUNCTION_PARAMETERS, libcouchbase_
 		}
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2187,6 +2211,10 @@ static void php_couchbase_store_impl(INTERNAL_FUNCTION_PARAMETERS, libcouchbase_
 		}
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2317,6 +2345,10 @@ static void php_couchbase_remove_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {
 		php_couchbase_ctx *ctx;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2379,6 +2411,10 @@ static void php_couchbase_flush_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{
 		php_couchbase_ctx *ctx;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2452,6 +2488,10 @@ static void php_couchbase_arithmetic_impl(INTERNAL_FUNCTION_PARAMETERS, char op,
 		long delta = (op == '+')? offset : -offset;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2510,6 +2550,10 @@ static void php_couchbase_stats_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{
 		php_couchbase_ctx *ctx;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2561,6 +2605,10 @@ static void php_couchbase_version_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* 
 		php_couchbase_ctx *ctx;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;
@@ -2621,6 +2669,10 @@ static void php_couchbase_cas_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {{{ 
 		php_couchbase_ctx *ctx;
 
 		ZEND_FETCH_RESOURCE2(couchbase_res, php_couchbase_res *, &res, -1, PHP_COUCHBASE_RESOURCE, le_couchbase, le_pcouchbase);
+		if (!couchbase_res->is_connected) {
+			php_error(E_WARNING, "There is no active connection to couchbase.");
+			RETURN_FALSE;
+		}
 		if (couchbase_res->async) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "there are some results should be fetched before do any sync request");
 			RETURN_FALSE;

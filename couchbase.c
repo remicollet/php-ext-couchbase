@@ -39,9 +39,6 @@
 #include "ext/standard/php_var.h"
 #include <libcouchbase/couchbase.h>
 #include "php_couchbase.h"
-#ifdef HAVE_COMPRESSION_FASTLZ
-# include "fastlz.c"
-#endif
 #ifdef HAVE_COMPRESSION_ZLIB
 # include "zlib.h"
 #endif
@@ -480,10 +477,8 @@ ZEND_GET_MODULE(couchbase)
 static PHP_INI_MH(OnUpdateCompressor) {
 	if (!new_value || !strcmp(new_value, "none")) {
 		COUCHBASE_G(compressor_real) = COUCHBASE_COMPRESSION_NONE;
-#ifdef HAVE_COMPRESSION_FASTLZ
 	} else if (!strcmp(new_value, "fastlz")) {
 		COUCHBASE_G(compressor_real) = COUCHBASE_COMPRESSION_FASTLZ;
-#endif
 #ifdef HAVE_COMPRESSION_ZLIB
 	} else if (!strcmp(new_value, "zlib")) {
 		COUCHBASE_G(compressor_real) = COUCHBASE_COMPRESSION_ZLIB;
@@ -607,26 +602,15 @@ static char * php_couchbase_zval_to_payload(zval *value, size_t *payload_len, un
 	if (COUCHBASE_GET_COMPRESSION(*flags)) {
 		/* status */
 		zend_bool compress_status = 0;
-
-		/* Additional 5% for the data */
-		size_t payload_comp_len = (size_t)((buf.len * 1.05) + 1);
-		char *payload_comp = emalloc(payload_comp_len + sizeof(size_t));
-		payload = payload_comp;
-		memcpy(payload_comp, &buf.len, sizeof(size_t));
-		payload_comp += sizeof(size_t);
+        php_couchbase_comp cmpbuf = { NULL };
 
 		switch (compressor) {
 			case COUCHBASE_COMPRESSION_FASTLZ:
-#ifdef HAVE_COMPRESSION_FASTLZ
-				compress_status = ((payload_comp_len = fastlz_compress(buf.c, buf.len, payload_comp)) > 0);
-#else
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not compress value, no fastlz lib support");
-				return NULL;
-#endif
+                compress_status = php_couchbase_compress_fastlz(&buf, &cmpbuf);
 				break;
 			 case COUCHBASE_COMPRESSION_ZLIB:
 #ifdef HAVE_COMPRESSION_ZLIB
-				compress_status = (compress((Bytef *)payload_comp, &payload_comp_len, (Bytef *)buf.c, buf.len) == Z_OK);
+				compress_status = php_couchbase_compress_zlib(&buf, &cmpbuf);
 #else
 				php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not compress value, no zlib lib support");
 				return NULL;
@@ -639,20 +623,23 @@ static char * php_couchbase_zval_to_payload(zval *value, size_t *payload_len, un
 
 		if (!compress_status) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not compress value");
-			efree(payload);
+            cbcomp_free(&cmpbuf);
 			smart_str_free(&buf);
 			return NULL;
 		}
 
 		/* Check that we are above ratio */
-		if (buf.len > (payload_comp_len * COUCHBASE_G(compression_factor))) {
-			*payload_len = payload_comp_len + sizeof(size_t);
-			payload[*payload_len] = 0;
+        if (buf.len > (cmpbuf.compressed_len * COUCHBASE_G(compression_factor))) {
+            cbcomp_deploy(&cmpbuf);
+            *payload_len = cmpbuf.compressed_len;
+            payload = cmpbuf.data;
+            *flags |= COUCHBASE_COMPRESSION_MCISCOMPRESSED;
 		} else {
 			COUCHBASE_SET_COMPRESSION(*flags, COUCHBASE_COMPRESSION_NONE);
 			*payload_len = buf.len;
 			memcpy(payload, buf.c, buf.len);
-			payload[buf.len] = 0;
+            cbcomp_free(&cmpbuf);
+            cmpbuf.data = NULL;
 		}
 
 	} else {
@@ -712,13 +699,9 @@ static zend_bool is_uncompressed_json_payload(char *payload, size_t len) {
 	}
 }
 
-static int php_couchbase_zval_from_payload(zval *value, char *payload, size_t payload_len, unsigned int flags, int serializer TSRMLS_DC) /* {{{ */ {
+static int php_couchbase_zval_from_payload(zval *value, char *payload, size_t payload_len, unsigned int flags, int serializer, int ignoreflags TSRMLS_DC) /* {{{ */ {
 	int compressor;
 	zend_bool payload_emalloc = 0;
-	zend_bool is_uncompressed_json = 0;
-#ifdef HAVE_COMPRESSION
-	char *buffer = NULL;
-#endif
 
 	if (payload == NULL && payload_len > 0) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING,
@@ -733,81 +716,41 @@ static int php_couchbase_zval_from_payload(zval *value, char *payload, size_t pa
 		return 1;
 	}
 
-	is_uncompressed_json = is_uncompressed_json_payload(payload, payload_len);
+    if (ignoreflags) {
+        ZVAL_STRINGL(value, payload, payload_len, 1);
+        return 1;
+    }
 
 	if ((compressor = COUCHBASE_GET_COMPRESSION(flags))) {
-#ifdef HAVE_COMPRESSION
-		size_t len, length;
-		zend_bool decompress_status = 0;
-		if (is_uncompressed_json == 1) {
-			len = payload_len;
-			compressor = COUCHBASE_COMPRESSION_NONE;
-		} else {
-			/* This is copied from pecl-memcached */
-			memcpy(&len, payload, sizeof(size_t));
-		}
 
-		buffer = emalloc(len + 1);
-		if (is_uncompressed_json == 0) {
-			payload_len -= sizeof(size_t);
-			payload += sizeof(size_t);
-		}
-		length = len;
+		php_couchbase_decomp dcmp = { NULL };
+		zend_bool decompress_status = 0;
+
+		cbcomp_dcmp_init(payload, payload_len, &dcmp);
 
 		switch (compressor) {
-			case COUCHBASE_COMPRESSION_NONE:
-				decompress_status = 1;
-				length = len;
-				memcpy(buffer, payload, len + 1);
-				break;
-			case COUCHBASE_COMPRESSION_FASTLZ:
-#ifdef HAVE_COMPRESSION_FASTLZ
-				decompress_status = ((length = fastlz_decompress(payload, payload_len, buffer, len)) > 0);
-#else
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not decompress value, no fastlz lib support");
-				return 0;
-#endif
-				break;
-			case COUCHBASE_COMPRESSION_ZLIB:
+		case COUCHBASE_COMPRESSION_FASTLZ:
+			decompress_status = php_couchbase_decompress_fastlz(&dcmp);
+			break;
+		case COUCHBASE_COMPRESSION_ZLIB:
 #ifdef HAVE_COMPRESSION_ZLIB
-				decompress_status = (uncompress((Bytef *)buffer, &length, (Bytef *)payload, payload_len) == Z_OK);
-				/* Fall back to 'old style decompression' */
-				if (!decompress_status) {
-					unsigned int factor = 1, maxfactor = 16;
-					int status;
-
-					do {
-						length = (unsigned long)payload_len * (1 << factor++);
-						buffer = erealloc(buffer, length + 1);
-						memset(buffer, 0, length + 1);
-						status = uncompress((Bytef *)buffer, (uLongf *)&length, (const Bytef *)payload, payload_len);
-					} while ((status == Z_BUF_ERROR) && (factor < maxfactor));
-
-					if (status == Z_OK) {
-						decompress_status = 1;
-					}
-				}
-
+			decompress_status = php_couchbase_decompress_zlib(&dcmp);
 #else
-				php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not decompress value, no zlib lib support");
-				return 0;
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not decompress value, no zlib lib support");
+			return 0;
 #endif
-				break;
+			break;
 		}
 
 		if (!decompress_status) {
-			php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not decompress value");
-			efree(buffer);
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not decompress value (bad content)");
+			cbcomp_dcmp_free(&dcmp);
 			return 0;
 		}
 
-		payload = buffer;
-		payload_len = length;
+		payload = dcmp.expanded;
+		payload_len = dcmp.expanded_len;
 		payload_emalloc = 1;
-#else
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "could not decompress value, no decompressor found");
-		return 0;
-#endif
 	}
 
 	switch (COUCHBASE_VAL_GET_TYPE(flags)) {
@@ -962,7 +905,7 @@ php_couchbase_get_callback(libcouchbase_t handle,
 	if (ctx->res->async) { /* get_delayed */
 		zval *k, *v;
 		MAKE_STD_ZVAL(v);
-		if (!php_couchbase_zval_from_payload(v, (char *)bytes, nbytes, flags, ctx->res->serializer TSRMLS_CC)) {
+		if (!php_couchbase_zval_from_payload(v, (char *)bytes, nbytes, flags, ctx->res->serializer, ctx->res->ignoreflags TSRMLS_CC)) {
 			ctx->res->rc = LIBCOUCHBASE_ERROR;
 			efree(v);
 			return;
@@ -1005,7 +948,7 @@ php_couchbase_get_callback(libcouchbase_t handle,
 			zval *v;
 			char *key_string;
 			MAKE_STD_ZVAL(v);
-			if (!php_couchbase_zval_from_payload(v, (char *)bytes, nbytes, flags, ctx->res->serializer TSRMLS_CC)) {
+			if (!php_couchbase_zval_from_payload(v, (char *)bytes, nbytes, flags, ctx->res->serializer, ctx->res->ignoreflags TSRMLS_CC)) {
 				ctx->res->rc = LIBCOUCHBASE_ERROR;
 				efree(v);
 				return;
@@ -1038,7 +981,7 @@ php_couchbase_get_callback(libcouchbase_t handle,
 					key = estrndup(((const char *)key) + ctx->res->prefix_key_len + 1, nkey);
 				}
 			}
-			if (!php_couchbase_zval_from_payload(ctx->rv, (char *)bytes, nbytes, flags, ctx->res->serializer TSRMLS_CC)) {
+			if (!php_couchbase_zval_from_payload(ctx->rv, (char *)bytes, nbytes, flags, ctx->res->serializer, ctx->res->ignoreflags TSRMLS_CC)) {
 				if (ctx->res->prefix_key_len && nkey) {
 					efree((void *)key);
 				}
@@ -1515,6 +1458,7 @@ static void php_couchbase_create_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) /* {
 			couchbase_res->async = 0;
 			couchbase_res->serializer = COUCHBASE_G(serializer_real);
 			couchbase_res->compressor = COUCHBASE_G(compressor_real);
+            couchbase_res->ignoreflags = 0;
 			efree(hashed_key);
 		} else {
 create_new_link:
@@ -1564,6 +1508,7 @@ create_new_link:
 			couchbase_res->async = 0;
 			couchbase_res->serializer = COUCHBASE_G(serializer_real);
 			couchbase_res->compressor = COUCHBASE_G(compressor_real);
+            couchbase_res->ignoreflags = 0;
 
 			ctx = ecalloc(1, sizeof(php_couchbase_ctx));
 			ctx->res = couchbase_res;
@@ -2803,7 +2748,12 @@ static void php_couchbase_set_option_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) 
 				}
 			}
 			break;
-		default:
+    case COUCHBASE_OPT_IGNOREFLAGS:
+        convert_to_long_ex(&value);
+        couchbase_res->ignoreflags = Z_LVAL_P(value);
+        break;
+
+    default:
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "unknown option type: %ld", option);
 			break;
 	}
@@ -2848,7 +2798,11 @@ static void php_couchbase_get_option_impl(INTERNAL_FUNCTION_PARAMETERS, int oo) 
 		case COUCHBASE_OPT_COMPRESSION:
 			RETURN_LONG(couchbase_res->compressor);
 			break;
-		default:
+    case COUCHBASE_OPT_IGNOREFLAGS:
+        RETURN_LONG(couchbase_res->ignoreflags);
+        break;
+
+    default:
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "unknown option type: %ld", option);
 			break;
 	}
@@ -3276,6 +3230,7 @@ PHP_MINIT_FUNCTION(couchbase) {
 	REGISTER_LONG_CONSTANT("COUCHBASE_OPT_SERIALIZER",	   COUCHBASE_OPT_SERIALIZER, CONST_PERSISTENT | CONST_CS);
 	REGISTER_LONG_CONSTANT("COUCHBASE_OPT_COMPRESSION",		COUCHBASE_OPT_COMPRESSION, CONST_PERSISTENT | CONST_CS);
 	REGISTER_LONG_CONSTANT("COUCHBASE_OPT_PREFIX_KEY",	   COUCHBASE_OPT_PREFIX_KEY, CONST_PERSISTENT | CONST_CS);
+    REGISTER_LONG_CONSTANT("COUCHBASE_OPT_IGNOREFLAGS",                     COUCHBASE_OPT_IGNOREFLAGS, CONST_PERSISTENT | CONST_CS);
 
 	REGISTER_LONG_CONSTANT("COUCHBASE_SERIALIZER_PHP",	   COUCHBASE_SERIALIZER_PHP, CONST_PERSISTENT | CONST_CS);
 	REGISTER_LONG_CONSTANT("COUCHBASE_SERIALIZER_JSON",	   COUCHBASE_SERIALIZER_JSON, CONST_PERSISTENT | CONST_CS);
@@ -3317,6 +3272,7 @@ PHP_MINIT_FUNCTION(couchbase) {
 	zend_declare_class_constant_long(couchbase_ce, ZEND_STRL("OPT_SERIALIZER"), COUCHBASE_OPT_SERIALIZER TSRMLS_CC);
 	zend_declare_class_constant_long(couchbase_ce, ZEND_STRL("OPT_COMPRESSION"), COUCHBASE_OPT_COMPRESSION TSRMLS_CC);
 	zend_declare_class_constant_long(couchbase_ce, ZEND_STRL("OPT_PREFIX_KEY"), COUCHBASE_OPT_PREFIX_KEY TSRMLS_CC);
+    zend_declare_class_constant_long(couchbase_ce, ZEND_STRL("OPT_IGNOREFLAGS"), COUCHBASE_OPT_IGNOREFLAGS TSRMLS_CC);
 
 	zend_declare_class_constant_long(couchbase_ce, ZEND_STRL("COMPRESSION_NONE"), COUCHBASE_COMPRESSION_NONE TSRMLS_CC);
 	zend_declare_class_constant_long(couchbase_ce, ZEND_STRL("COMPRESSION_FASTLZ"), COUCHBASE_COMPRESSION_FASTLZ TSRMLS_CC);
@@ -3368,11 +3324,7 @@ PHP_MINFO_FUNCTION(couchbase)
 #else
 	php_info_print_table_row(2, "json support", "no");
 #endif
-#ifdef HAVE_COMPRESSION_FASTLZ
 	php_info_print_table_row(2, "fastlz support", "yes");
-#else
-	php_info_print_table_row(2, "fastlz support", "no");
-#endif
 #ifdef HAVE_COMPRESSION_ZLIB
 	php_info_print_table_row(2, "zlib support", "yes");
 #else

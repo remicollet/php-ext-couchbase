@@ -13,9 +13,6 @@ PHP_ARG_WITH(zlib-dir, for ZLIB,
 [  --with-zlib-dir[=DIR]   Set the path to ZLIB install prefix.], no, no)
 fi
 
-PHP_ARG_WITH(fastlz-src, for FastLZ,
-[  --with-fastlz-src[=DIR]   Set the path to FastLz src prefix.], no, no)
-
 if test "$PHP_COUCHBASE" != "no"; then
   if test -r "$PHP_COUCHBASE/include/libcouchbase/couchbase.h"; then
       AC_MSG_CHECKING([for libcouchbase location])
@@ -170,22 +167,10 @@ if test "$PHP_COUCHBASE" != "no"; then
     AC_MSG_ERROR([couchbase support requires ZLIB. Use --with-zlib-dir=<DIR> to specify the prefix where ZLIB headers and library are located])
   fi
 
-  if test "$PHP_FASTLZ_SRC" != "no"; then
-    AC_MSG_CHECKING([for fastlz src location])
-    if test -f "$PHP_FASTLZ_SRC/fastlz.c"; then
-      AC_MSG_RESULT([$PHP_FASTLZ_SRC])
-      PHP_ADD_INCLUDE($PHP_FASTLZ_SRC)
-      AC_DEFINE(HAVE_COMPRESSION,1,[Whether has a compresser])
-      AC_DEFINE(HAVE_COMPRESSION_FASTLZ,1,[Whether fastlz lib is available])
-    else
-      AC_MSG_ERROR([Can't find fastlz src under $PHP_FASTLZ_SRC])
-    fi
-  fi
-
   dnl PHP_REQUIRE_CXX()
   dnl PHP_ADD_LIBRARY(stdc++, 1, COUCHBASE_SHARED_LIBADD)
   dnl PHP_ADD_LIBRARY(event, 1, COUCHBASE_SHARED_LIBADD)
   PHP_SUBST(COUCHBASE_SHARED_LIBADD)
 
-  PHP_NEW_EXTENSION(couchbase, couchbase.c, $ext_shared)
+  PHP_NEW_EXTENSION(couchbase, compress.c couchbase.c fastlz/fastlz.c, $ext_shared)
 fi

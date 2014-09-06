@@ -56,7 +56,11 @@
 #include "ext/standard/php_var.h"
 #include <libcouchbase/couchbase.h>
 #include "php_couchbase.h"
+#ifdef HAVE_FASTLZ_H
+#include <fastlz.h>
+#else
 #include "fastlz/fastlz.h"
+#endif
 
 #ifdef PHP_WIN32
 #ifndef PRIu64
